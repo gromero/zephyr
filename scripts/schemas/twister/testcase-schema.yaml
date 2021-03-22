@@ -175,6 +175,12 @@ mapping:
             type: map
             required: no
             mapping:
+              "interpreter":
+                type: str
+                required: no
+              "executable":
+                type: str
+                required: no
               "type":
                 type: str
                 required: no

@@ -937,84 +937,122 @@ class QEMUHandler(Handler):
         in_fp = open(fifo_out, "rb", buffering=0)
         log_out_fp = open(logfile, "wt")
 
-        start_time = time.time()
-        timeout_time = start_time + timeout
-        p = select.poll()
-        p.register(in_fp, select.POLLIN)
-        out_state = None
-
-        line = ""
-        timeout_extended = False
-
+        # QEMU pid
         pid = 0
         if os.path.exists(pid_fn):
             pid = int(open(pid_fn).read())
 
-        while True:
-            this_timeout = int((timeout_time - time.time()) * 1000)
-            if this_timeout < 0 or not p.poll(this_timeout):
-                try:
-                    if pid and this_timeout > 0:
-                        #there's possibility we polled nothing because
-                        #of not enough CPU time scheduled by host for
-                        #QEMU process during p.poll(this_timeout)
-                        cpu_time = QEMUHandler._get_cpu_time(pid)
-                        if cpu_time < timeout and not out_state:
-                            timeout_time = time.time() + (timeout - cpu_time)
-                            continue
-                except ProcessLookupError:
-                    out_state = "failed"
+        start_time = time.time()
+
+        # External harness
+        if harness.external:
+            print(f"* Harness interpreter: {harness.interpreter}")
+            print(f"* Harness executable: {harness.executable}")
+            print( "* build_dir =", handler.build_dir)
+            print( "* sourcedir =", handler.sourcedir)
+
+            harness_cmd = " ".join([handler.sourcedir + "/" + harness.executable,
+                                        fifo_out,
+                                        fifo_in,])
+            print("External harness command: ", harness_cmd)
+
+            harness_executable = handler.sourcedir + "/" + harness.executable
+            try:
+                output = subprocess.check_output([harness_executable,fifo_out,fifo_in], timeout=10, shell=False, text=True)
+                print("External harness output:")
+                # XXX: remove print()
+                print(output)
+
+                if pid == 0 and os.path.exists(pid_fn):
+                    pid = int(open(pid_fn).read())
+                logger.debug(f"QEMU PID is {pid}. Test output against QEMU:")
+                logger.debug(output)
+
+                harness.state = "passed"
+                out_state = "passed"
+            except subprocess.TimeoutExpired:
+                harness.state = "failed"
+                out_state = "timeout"
+            except subprocess.CalledProcessError as error:
+                logger.debug(error.output)
+                harness.state = "failed"
+                out_state = "failed"
+
+        # Internal harness
+        else:
+            timeout_time = start_time + timeout
+            p = select.poll()
+            p.register(in_fp, select.POLLIN)
+            out_state = None
+
+            line = ""
+            timeout_extended = False
+
+            while True:
+                this_timeout = int((timeout_time - time.time()) * 1000)
+                if this_timeout < 0 or not p.poll(this_timeout):
+                    try:
+                        if pid and this_timeout > 0:
+                            #there's possibility we polled nothing because
+                            #of not enough CPU time scheduled by host for
+                            #QEMU process during p.poll(this_timeout)
+                            cpu_time = QEMUHandler._get_cpu_time(pid)
+                            if cpu_time < timeout and not out_state:
+                                timeout_time = time.time() + (timeout - cpu_time)
+                                continue
+                    except ProcessLookupError:
+                        out_state = "failed"
+                        break
+
+                    if not out_state:
+                        out_state = "timeout"
                     break
 
-                if not out_state:
-                    out_state = "timeout"
-                break
+                if pid == 0 and os.path.exists(pid_fn):
+                    pid = int(open(pid_fn).read())
 
-            if pid == 0 and os.path.exists(pid_fn):
-                pid = int(open(pid_fn).read())
+                try:
+                    c = in_fp.read(1).decode("utf-8")
+                except UnicodeDecodeError:
+                    # Test is writing something weird, fail
+                    out_state = "unexpected byte"
+                    break
 
-            try:
-                c = in_fp.read(1).decode("utf-8")
-            except UnicodeDecodeError:
-                # Test is writing something weird, fail
-                out_state = "unexpected byte"
-                break
+                if c == "":
+                    # EOF, this shouldn't happen unless QEMU crashes
+                    if not ignore_unexpected_eof:
+                        out_state = "unexpected eof"
+                    break
+                line = line + c
+                if c != "\n":
+                    continue
 
-            if c == "":
-                # EOF, this shouldn't happen unless QEMU crashes
-                if not ignore_unexpected_eof:
-                    out_state = "unexpected eof"
-                break
-            line = line + c
-            if c != "\n":
-                continue
+                # line contains a full line of data output from QEMU
+                log_out_fp.write(line)
+                log_out_fp.flush()
+                line = line.strip()
+                logger.debug(f"QEMU ({pid}): {line}")
 
-            # line contains a full line of data output from QEMU
-            log_out_fp.write(line)
-            log_out_fp.flush()
-            line = line.strip()
-            logger.debug(f"QEMU ({pid}): {line}")
+                harness.handle(line)
+                if harness.state:
+                    # if we have registered a fail make sure the state is not
+                    # overridden by a false success message coming from the
+                    # testsuite
+                    if out_state not in ['failed', 'unexpected eof', 'unexpected byte']:
+                        out_state = harness.state
 
-            harness.handle(line)
-            if harness.state:
-                # if we have registered a fail make sure the state is not
-                # overridden by a false success message coming from the
-                # testsuite
-                if out_state not in ['failed', 'unexpected eof', 'unexpected byte']:
-                    out_state = harness.state
-
-                # if we get some state, that means test is doing well, we reset
-                # the timeout and wait for 2 more seconds to catch anything
-                # printed late. We wait much longer if code
-                # coverage is enabled since dumping this information can
-                # take some time.
-                if not timeout_extended or harness.capture_coverage:
-                    timeout_extended = True
-                    if harness.capture_coverage:
-                        timeout_time = time.time() + 30
-                    else:
-                        timeout_time = time.time() + 2
-            line = ""
+                    # if we get some state, that means test is doing well, we reset
+                    # the timeout and wait for 2 more seconds to catch anything
+                    # printed late. We wait much longer if code
+                    # coverage is enabled since dumping this information can
+                    # take some time.
+                    if not timeout_extended or harness.capture_coverage:
+                        timeout_extended = True
+                        if harness.capture_coverage:
+                            timeout_time = time.time() + 30
+                        else:
+                            timeout_time = time.time() + 2
+                line = ""
 
         handler.record(harness)
 
@@ -1085,6 +1123,8 @@ class QEMUHandler(Handler):
         is_timeout = False
         qemu_pid = None
 
+        print("command = > " , command)
+
         with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=self.build_dir) as proc:
             logger.debug("Spawning QEMUHandler Thread for %s" % self.name)
 
@@ -1129,6 +1169,7 @@ class QEMUHandler(Handler):
         logger.debug(f"return code from QEMU ({qemu_pid}): {self.returncode}")
 
         if (self.returncode != 0 and not self.ignore_qemu_crash) or not harness.state:
+            print("================> meh")
             self.set_state("failed", 0)
             if is_timeout:
                 self.instance.reason = "Timeout"
@@ -1137,7 +1178,6 @@ class QEMUHandler(Handler):
 
     def get_fifo(self):
         return self.fifo_fn
-
 
 class SizeCalculator:
     alloc_sections = [
@@ -1770,7 +1810,9 @@ class TestInstance(DisablePyTestCollectionMixin):
     def testcase_runnable(testcase, fixtures):
         can_run = False
         # console harness allows us to run the test and capture data.
-        if testcase.harness in [ 'console', 'ztest']:
+        print("harness =====> ", testcase.harness)
+        print("fixtures ====> ", fixtures)
+        if testcase.harness in [ 'console', 'ztest', 'external']:
             can_run = True
             # if we have a fixture that is also being supplied on the
             # command-line, then we need to run the test, not just build it.
@@ -2919,8 +2961,8 @@ class TestSuite(DisablePyTestCollectionMixin):
                         tc.timeout = tc_dict["timeout"]
                         tc.harness = tc_dict["harness"]
                         tc.harness_config = tc_dict["harness_config"]
-                        if tc.harness == 'console' and not tc.harness_config:
-                            raise Exception('Harness config error: console harness defined without a configuration.')
+                        if tc.harness in ['console', 'external'] and not tc.harness_config:
+                            raise Exception(f'Harness config error: {tc.harness} harness defined without a configuration.')
                         tc.build_only = tc_dict["build_only"]
                         tc.build_on_all = tc_dict["build_on_all"]
                         tc.slow = tc_dict["slow"]

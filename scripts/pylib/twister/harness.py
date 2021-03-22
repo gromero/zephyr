@@ -28,6 +28,7 @@ class Harness:
         self.recording = []
         self.fieldnames = []
         self.ztest = False
+        self.external = False
 
     def configure(self, instance):
         config = instance.testcase.harness_config
@@ -160,3 +161,22 @@ class Test(Harness):
 
 class Ztest(Test):
     pass
+
+class External(Harness):
+    def __init__(self):
+        super().__init__()
+        self.external = True
+        self.interpreter = None
+        self.executable = None
+
+    def configure(self, instance):
+        config = instance.testcase.harness_config
+        self.id = instance.testcase.id
+
+        if config:
+            self.interpreter = config.get('interpreter', None)
+            self.executable = config.get('executable', None)
+
+    def process_test(self):
+        print("Error: 'External' harness can't parse/test input by itself")
+        raise NotImplemented
