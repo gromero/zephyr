@@ -81,8 +81,8 @@ import scl
 import expr_parser
 
 logger = logging.getLogger('twister')
-logger.setLevel(logging.DEBUG)
-
+# logger.setLevel(logging.DEBUG)
+logging.basicConfig(level="INFO")
 
 class ExecutionCounter(object):
     def __init__(self, total=0):
