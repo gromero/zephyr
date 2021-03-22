@@ -909,7 +909,7 @@ class QEMUHandler(Handler):
 
         The guest virtual time in QEMU icount mode isn't host time and
         it's maintained by counting guest instructions, so we use QEMU
-        process exection time to mostly simulate the time of guest OS.
+        process execution time to mostly simulate the time of guest OS.
         """
         proc = psutil.Process(pid)
         cpu_time = proc.cpu_times()
